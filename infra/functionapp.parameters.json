@@ -3,7 +3,6 @@
   "contentVersion": "1.0.0.0",
   "parameters": {
     "location": { "value": "${AZURE_LOCATION}" },
-    "environmentName": { "value": "${AZURE_ENV_NAME}" },
-    "containerImageTag": { "value": "${IMAGE_TAG}" }
+  "environmentName": { "value": "${AZURE_ENV_NAME}" }
   }
 }

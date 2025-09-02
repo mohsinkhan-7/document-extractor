@@ -82,7 +82,7 @@ jobs:
             -n functionapp \
             -f infra/functionapp.bicep \
             -p @infra/functionapp.parameters.json \
-            -p location=${AZURE_LOCATION} environmentName=${AZURE_ENV_NAME} containerImageTag=${IMAGE_TAG}
+            -p location=${AZURE_LOCATION} environmentName=${AZURE_ENV_NAME}
           # capture outputs
           ACR_SERVER=$(az deployment group show -g ${{ steps.rg.outputs.rg_name }} -n functionapp --query properties.outputs.ACR_LOGIN_SERVER.value -o tsv || true)
           FUNC_NAME=$(az deployment group show -g ${{ steps.rg.outputs.rg_name }} -n functionapp --query properties.outputs.FUNCTION_APP_NAME.value -o tsv || true)
@@ -105,17 +105,33 @@ jobs:
           docker build -f Dockerfile.functions -t $IMAGE .
           docker push $IMAGE
 
-      - name: Update Function App to new image
+      - name: Update Function App to new image (preserve ACR MI)
+        run: |
+          set -e
+          FUNC_NAME=${{ steps.bicep.outputs.func_name }}
+          if [ -z "$FUNC_NAME" ]; then
+            FUNC_NAME=$(az functionapp list -g ${{ steps.rg.outputs.rg_name }} --query "[0].name" -o tsv)
+          fi
+          IMAGE="DOCKER|${{ steps.acr.outputs.login_server }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
+          # Update only linuxFxVersion to avoid wiping ACR MI settings
+          az resource update \
+            -g ${{ steps.rg.outputs.rg_name }} \
+            --resource-type Microsoft.Web/sites/config \
+            -n "$FUNC_NAME/web" \
+            --set properties.linuxFxVersion="$IMAGE"
+          az functionapp restart -g ${{ steps.rg.outputs.rg_name }} -n $FUNC_NAME
+
+      - name: Verify container config
         run: |
           FUNC_NAME=${{ steps.bicep.outputs.func_name }}
           if [ -z "$FUNC_NAME" ]; then
             FUNC_NAME=$(az functionapp list -g ${{ steps.rg.outputs.rg_name }} --query "[0].name" -o tsv)
           fi
-          az functionapp config container set \
+          az resource show \
             -g ${{ steps.rg.outputs.rg_name }} \
-            -n $FUNC_NAME \
-            --docker-custom-image-name ${{ steps.acr.outputs.login_server }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
-          az functionapp restart -g ${{ steps.rg.outputs.rg_name }} -n $FUNC_NAME
+            --resource-type Microsoft.Web/sites/config \
+            -n "$FUNC_NAME/web" \
+            --query "properties.{linuxFxVersion:linuxFxVersion,acrUseManagedIdentityCreds:acrUseManagedIdentityCreds,acrUserManagedIdentityID:acrUserManagedIdentityID}" -o table
 
       - name: Output URL
         run: |

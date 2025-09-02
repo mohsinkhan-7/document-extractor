@@ -6,8 +6,6 @@ param location string
 @description('Environment name (e.g., dev, prod)')
 param environmentName string
 
-@description('Container image tag for the Functions image')
-param containerImageTag string = 'latest'
 
 var token = uniqueString(subscription().id, resourceGroup().id, location, environmentName)
 
@@ -86,7 +84,6 @@ resource func 'Microsoft.Web/sites@2022-09-01' = {
   properties: {
     serverFarmId: plan.id
     siteConfig: {
-    linuxFxVersion: 'DOCKER|${acr.properties.loginServer}/document-extractor-func:${containerImageTag}'
       appSettings: [
         {
           name: 'FUNCTIONS_WORKER_RUNTIME'

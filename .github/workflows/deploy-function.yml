@@ -42,6 +42,14 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      - name: Ensure resource providers are registered
+        shell: bash
+        run: |
+          set -e
+          for rp in Microsoft.Web Microsoft.ContainerRegistry Microsoft.Insights Microsoft.ManagedIdentity Microsoft.Storage; do
+            az provider register --namespace $rp --wait
+          done
+
       - name: Verify Azure principal
         id: whoami
         shell: bash
@@ -77,17 +85,49 @@ jobs:
       - name: Deploy infra (Bicep)
         id: bicep
         run: |
+          set -e
           az deployment group create \
             -g ${{ steps.rg.outputs.rg_name }} \
             -n functionapp \
             -f infra/functionapp.bicep \
             -p @infra/functionapp.parameters.json \
             -p location=${AZURE_LOCATION} environmentName=${AZURE_ENV_NAME}
+          # verify deployment success
+          STATE=$(az deployment group show -g ${{ steps.rg.outputs.rg_name }} -n functionapp --query properties.provisioningState -o tsv || echo "")
+          if [ "$STATE" != "Succeeded" ]; then
+            echo "Deployment did not succeed (state=$STATE). Showing operations..." 1>&2
+            az deployment operation group list -g ${{ steps.rg.outputs.rg_name }} -n functionapp -o table || true
+            exit 1
+          fi
           # capture outputs
           ACR_SERVER=$(az deployment group show -g ${{ steps.rg.outputs.rg_name }} -n functionapp --query properties.outputs.ACR_LOGIN_SERVER.value -o tsv || true)
           FUNC_NAME=$(az deployment group show -g ${{ steps.rg.outputs.rg_name }} -n functionapp --query properties.outputs.FUNCTION_APP_NAME.value -o tsv || true)
           echo "acr_login_server=$ACR_SERVER" >> $GITHUB_OUTPUT
           echo "func_name=$FUNC_NAME" >> $GITHUB_OUTPUT
+
+      - name: Wait for Function App resource
+        shell: bash
+        run: |
+          set -e
+          FUNC_NAME=${{ steps.bicep.outputs.func_name }}
+          if [ -z "$FUNC_NAME" ]; then
+            FUNC_NAME=$(az functionapp list -g ${{ steps.rg.outputs.rg_name }} --query "[0].name" -o tsv)
+          fi
+          if [ -z "$FUNC_NAME" ]; then
+            echo "Function App name not found after deployment." 1>&2
+            az functionapp list -g ${{ steps.rg.outputs.rg_name }} -o table || true
+            exit 1
+          fi
+          echo "Waiting for Function App $FUNC_NAME provisioningState=Succeeded..."
+          for i in {1..30}; do
+            STATE=$(az functionapp show -g ${{ steps.rg.outputs.rg_name }} -n "$FUNC_NAME" --query "properties.state" -o tsv 2>/dev/null || true)
+            PROV=$(az functionapp show -g ${{ steps.rg.outputs.rg_name }} -n "$FUNC_NAME" --query "provisioningState" -o tsv 2>/dev/null || true)
+            if [ "$PROV" = "Succeeded" ] || [ "$STATE" = "Running" ]; then
+              echo "Function App is ready: state=$STATE provisioningState=$PROV"
+              break
+            fi
+            sleep 10
+          done
 
       - name: Get ACR login server
         id: acr
@@ -95,6 +135,11 @@ jobs:
           ACR_SERVER=${{ steps.bicep.outputs.acr_login_server }}
           if [ -z "$ACR_SERVER" ]; then
             ACR_SERVER=$(az acr list --resource-group ${{ steps.rg.outputs.rg_name }} --query "[0].loginServer" -o tsv)
+          fi
+          if [ -z "$ACR_SERVER" ]; then
+            echo "ACR login server not found. Check deployment outputs and that ACR exists in the resource group." 1>&2
+            az acr list --resource-group ${{ steps.rg.outputs.rg_name }} -o table || true
+            exit 1
           fi
           echo "login_server=$ACR_SERVER" >> $GITHUB_OUTPUT
 
@@ -111,6 +156,11 @@ jobs:
           FUNC_NAME=${{ steps.bicep.outputs.func_name }}
           if [ -z "$FUNC_NAME" ]; then
             FUNC_NAME=$(az functionapp list -g ${{ steps.rg.outputs.rg_name }} --query "[0].name" -o tsv)
+          fi
+          if [ -z "$FUNC_NAME" ]; then
+            echo "Function App name not found. Check deployment outputs and RG contents." 1>&2
+            az functionapp list -g ${{ steps.rg.outputs.rg_name }} -o table || true
+            exit 1
           fi
           IMAGE="DOCKER|${{ steps.acr.outputs.login_server }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
           # Update only linuxFxVersion to avoid wiping ACR MI settings

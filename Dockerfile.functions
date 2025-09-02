@@ -1,0 +1,33 @@
+# Azure Functions Python 3.11 base image
+FROM mcr.microsoft.com/azure-functions/python:4-python3.11
+
+ENV AzureWebJobsScriptRoot=/home/site/wwwroot \
+    AzureFunctionsJobHost__Logging__Console__IsEnabled=true \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+# Install system dependencies for OpenCV and Tesseract
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       tesseract-ocr \
+       libglib2.0-0 \
+       libgl1 \
+       libsm6 \
+       libxrender1 \
+       libxext6 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /home/site/wwwroot
+
+# Install Python dependencies for the Functions app
+COPY function_app/requirements.txt /home/site/wwwroot/requirements.txt
+RUN python -m pip install --upgrade pip && pip install -r requirements.txt
+
+# Copy function app and API code
+COPY function_app/ /home/site/wwwroot/
+COPY . /home/site/wwwroot/
+
+# Function runtime starts automatically
+CMD [ "/azure-functions-host/Microsoft.Azure.WebJobs.Script.WebHost" ]

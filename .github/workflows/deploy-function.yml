@@ -1,0 +1,92 @@
+name: Deploy Function App (Container) - dev
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AZURE_ENV_NAME: dev
+  AZURE_LOCATION: eastus2
+  IMAGE_NAME: document-extractor-func
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  deploy:
+    environment: dev
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Resolve subscription and resource group
+        id: rg
+        shell: bash
+        run: |
+          SUB_ID=$(az account show --query id -o tsv)
+          echo "sub_id=$SUB_ID" >> $GITHUB_OUTPUT
+          # create RG if not exists
+          RG_NAME=rg-doc-extractor-func-${AZURE_ENV_NAME}
+          az group create -n $RG_NAME -l ${AZURE_LOCATION}
+          echo "rg_name=$RG_NAME" >> $GITHUB_OUTPUT
+
+      - name: Deploy infra (Bicep)
+        id: bicep
+        run: |
+          az deployment group create \
+            -g ${{ steps.rg.outputs.rg_name }} \
+            -n functionapp \
+            -f infra/functionapp.bicep \
+            -p @infra/functionapp.parameters.json \
+            -p location=${AZURE_LOCATION} environmentName=${AZURE_ENV_NAME} containerImageTag=${IMAGE_TAG}
+          # capture outputs
+          ACR_SERVER=$(az deployment group show -g ${{ steps.rg.outputs.rg_name }} -n functionapp --query properties.outputs.ACR_LOGIN_SERVER.value -o tsv || true)
+          FUNC_NAME=$(az deployment group show -g ${{ steps.rg.outputs.rg_name }} -n functionapp --query properties.outputs.FUNCTION_APP_NAME.value -o tsv || true)
+          echo "acr_login_server=$ACR_SERVER" >> $GITHUB_OUTPUT
+          echo "func_name=$FUNC_NAME" >> $GITHUB_OUTPUT
+
+      - name: Get ACR login server
+        id: acr
+        run: |
+          ACR_SERVER=${{ steps.bicep.outputs.acr_login_server }}
+          if [ -z "$ACR_SERVER" ]; then
+            ACR_SERVER=$(az acr list --resource-group ${{ steps.rg.outputs.rg_name }} --query "[0].loginServer" -o tsv)
+          fi
+          echo "login_server=$ACR_SERVER" >> $GITHUB_OUTPUT
+
+      - name: Build and push image
+        run: |
+          az acr login --name $(echo ${{ steps.acr.outputs.login_server }} | cut -d. -f1)
+          IMAGE=${{ steps.acr.outputs.login_server }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          docker build -f Dockerfile.functions -t $IMAGE .
+          docker push $IMAGE
+
+      - name: Update Function App to new image
+        run: |
+          FUNC_NAME=${{ steps.bicep.outputs.func_name }}
+          if [ -z "$FUNC_NAME" ]; then
+            FUNC_NAME=$(az functionapp list -g ${{ steps.rg.outputs.rg_name }} --query "[0].name" -o tsv)
+          fi
+          az functionapp config container set \
+            -g ${{ steps.rg.outputs.rg_name }} \
+            -n $FUNC_NAME \
+            --docker-custom-image-name ${{ steps.acr.outputs.login_server }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          az functionapp restart -g ${{ steps.rg.outputs.rg_name }} -n $FUNC_NAME
+
+      - name: Output URL
+        run: |
+          FUNC_NAME=${{ steps.bicep.outputs.func_name }}
+          if [ -z "$FUNC_NAME" ]; then
+            FUNC_NAME=$(az functionapp list -g ${{ steps.rg.outputs.rg_name }} --query "[0].name" -o tsv)
+          fi
+          echo "https://$FUNC_NAME.azurewebsites.net"

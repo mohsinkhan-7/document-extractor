@@ -192,15 +192,37 @@ jobs:
 
       - name: Verify container config
         run: |
+          set +e
+          rg=${{ steps.rg.outputs.rg_name }}
+          sub=${{ steps.rg.outputs.sub_id }}
           FUNC_NAME=${{ steps.bicep.outputs.func_name }}
           if [ -z "$FUNC_NAME" ]; then
-            FUNC_NAME=$(az functionapp list -g ${{ steps.rg.outputs.rg_name }} --query "[0].name" -o tsv)
+            FUNC_NAME=$(az resource list -g "$rg" --resource-type Microsoft.Web/sites --query "[?contains(kind, 'functionapp')].name | [0]" -o tsv || true)
           fi
-          az resource show \
-            -g ${{ steps.rg.outputs.rg_name }} \
-            --resource-type Microsoft.Web/sites/config \
-            -n "$FUNC_NAME/web" \
-            --query "properties.{linuxFxVersion:linuxFxVersion,acrUseManagedIdentityCreds:acrUseManagedIdentityCreds,acrUserManagedIdentityID:acrUserManagedIdentityID}" -o table
+          if [ -z "$FUNC_NAME" ]; then
+            echo "Function App name not found for verification." 1>&2
+            az resource list -g "$rg" --resource-type Microsoft.Web/sites -o table || true
+            exit 0
+          fi
+          # Ensure the site exists (non-fatal)
+          az resource show -g "$rg" --resource-type Microsoft.Web/sites -n "$FUNC_NAME" -o none 2>/dev/null || true
+          # Read config via REST with retries
+          URI="https://management.azure.com/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.Web/sites/$FUNC_NAME/config/web?api-version=2022-09-01"
+          success=0
+          for i in {1..12}; do
+            echo "Fetch web config attempt $i..."
+            az rest --method get --uri "$URI" --output json >/tmp/webcfg.json 2>/dev/null
+            if [ $? -eq 0 ]; then
+              cat /tmp/webcfg.json | jq -r '.properties | {linuxFxVersion, acrUseManagedIdentityCreds, acrUserManagedIdentityID}'
+              success=1
+              break
+            fi
+            sleep 10
+          done
+          if [ $success -ne 1 ]; then
+            echo "Warning: web config not yet available; continuing" 1>&2
+            az functionapp show -g "$rg" -n "$FUNC_NAME" -o table || true
+          fi
 
       - name: Output URL
         run: |

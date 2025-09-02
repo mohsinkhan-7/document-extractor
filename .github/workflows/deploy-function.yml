@@ -50,6 +50,12 @@ jobs:
             az provider register --namespace $rp --wait
           done
 
+      - name: Install jq
+        shell: bash
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+
       - name: Verify Azure principal
         id: whoami
         shell: bash
@@ -103,6 +109,10 @@ jobs:
           ACR_SERVER=$(az deployment group show -g ${{ steps.rg.outputs.rg_name }} -n functionapp --query properties.outputs.ACR_LOGIN_SERVER.value -o tsv || true)
           FUNC_NAME=$(az deployment group show -g ${{ steps.rg.outputs.rg_name }} -n functionapp --query properties.outputs.FUNCTION_APP_NAME.value -o tsv || true)
           UAMI_ID=$(az deployment group show -g ${{ steps.rg.outputs.rg_name }} -n functionapp --query properties.outputs.UAMI_ID.value -o tsv || true)
+          if [ -z "$FUNC_NAME" ]; then
+            # Fallback: find any function app in the RG
+            FUNC_NAME=$(az resource list -g ${{ steps.rg.outputs.rg_name }} --resource-type Microsoft.Web/sites --query "[?contains(kind, 'functionapp')].name | [0]" -o tsv || true)
+          fi
           echo "acr_login_server=$ACR_SERVER" >> $GITHUB_OUTPUT
           echo "func_name=$FUNC_NAME" >> $GITHUB_OUTPUT
           echo "uami_id=$UAMI_ID" >> $GITHUB_OUTPUT

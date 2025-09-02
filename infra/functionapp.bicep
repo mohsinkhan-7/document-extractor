@@ -120,3 +120,4 @@ resource func 'Microsoft.Web/sites@2022-09-01' = {
 
 output FUNCTION_APP_NAME string = func.name
 output ACR_LOGIN_SERVER string = acr.properties.loginServer
+output UAMI_ID string = uami.id

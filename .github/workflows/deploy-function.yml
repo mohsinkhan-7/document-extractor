@@ -102,8 +102,10 @@ jobs:
           # capture outputs
           ACR_SERVER=$(az deployment group show -g ${{ steps.rg.outputs.rg_name }} -n functionapp --query properties.outputs.ACR_LOGIN_SERVER.value -o tsv || true)
           FUNC_NAME=$(az deployment group show -g ${{ steps.rg.outputs.rg_name }} -n functionapp --query properties.outputs.FUNCTION_APP_NAME.value -o tsv || true)
+          UAMI_ID=$(az deployment group show -g ${{ steps.rg.outputs.rg_name }} -n functionapp --query properties.outputs.UAMI_ID.value -o tsv || true)
           echo "acr_login_server=$ACR_SERVER" >> $GITHUB_OUTPUT
           echo "func_name=$FUNC_NAME" >> $GITHUB_OUTPUT
+          echo "uami_id=$UAMI_ID" >> $GITHUB_OUTPUT
 
       - name: Wait for Function App resource
         shell: bash
@@ -155,7 +157,7 @@ jobs:
           docker build -f Dockerfile.functions -t $IMAGE .
           docker push $IMAGE
 
-      - name: Update Function App to new image (preserve ACR MI)
+      - name: Update Function App to new image (PATCH preserve ACR MI)
         run: |
           set -e
           FUNC_NAME=${{ steps.bicep.outputs.func_name }}
@@ -168,13 +170,15 @@ jobs:
             exit 1
           fi
           IMAGE="DOCKER|${{ steps.acr.outputs.login_server }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
-          # Update only linuxFxVersion to avoid wiping ACR MI settings
-          az resource update \
-            -g ${{ steps.rg.outputs.rg_name }} \
-            --resource-type Microsoft.Web/sites/config \
-            -n "$FUNC_NAME/web" \
-            --set properties.linuxFxVersion="$IMAGE"
-          az functionapp restart -g ${{ steps.rg.outputs.rg_name }} -n $FUNC_NAME
+          UAMI_ID=${{ steps.bicep.outputs.uami_id }}
+          rg=${{ steps.rg.outputs.rg_name }}
+          BODY=$(jq -n --arg img "$IMAGE" --arg uami "$UAMI_ID" '{properties:{linuxFxVersion:$img, acrUseManagedIdentityCreds:true, acrUserManagedIdentityID:$uami}}')
+          az rest \
+            --method patch \
+            --uri "https://management.azure.com/subscriptions/${{ steps.rg.outputs.sub_id }}/resourceGroups/$rg/providers/Microsoft.Web/sites/$FUNC_NAME/config/web?api-version=2022-09-01" \
+            --headers Content-Type=application/json \
+            --body "$BODY"
+          az functionapp restart -g $rg -n $FUNC_NAME
 
       - name: Verify container config
         run: |

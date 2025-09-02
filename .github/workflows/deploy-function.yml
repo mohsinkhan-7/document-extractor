@@ -160,6 +160,29 @@ jobs:
           fi
           echo "login_server=$ACR_SERVER" >> $GITHUB_OUTPUT
 
+      - name: Verify AcrPull role assignment (UAMI -> ACR)
+        run: |
+          set -e
+          rg=${{ steps.rg.outputs.rg_name }}
+          ACR_NAME=$(echo ${{ steps.acr.outputs.login_server }} | cut -d. -f1)
+          ACR_ID=$(az acr show -n "$ACR_NAME" -g "$rg" --query id -o tsv)
+          UAMI_ID=${{ steps.bicep.outputs.uami_id }}
+          UAMI_PRINCIPAL_ID=$(az resource show --ids "$UAMI_ID" --query properties.principalId -o tsv)
+          echo "Waiting for AcrPull role on $ACR_NAME for principal $UAMI_PRINCIPAL_ID..."
+          ok=0
+          for i in {1..30}; do
+            COUNT=$(az role assignment list --assignee-object-id "$UAMI_PRINCIPAL_ID" --role "AcrPull" --scope "$ACR_ID" --query "length(@)" -o tsv)
+            echo "Attempt $i: assignments=$COUNT"
+            if [ "$COUNT" != "0" ] && [ -n "$COUNT" ]; then
+              ok=1; break
+            fi
+            sleep 10
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "Warning: AcrPull not confirmed yet; continuing (RBAC propagation can take several minutes)." 1>&2
+            az role assignment list --assignee-object-id "$UAMI_PRINCIPAL_ID" --scope "$ACR_ID" -o table || true
+          fi
+
       - name: Build and push image
         run: |
           az acr login --name $(echo ${{ steps.acr.outputs.login_server }} | cut -d. -f1)
@@ -189,6 +212,20 @@ jobs:
             --headers Content-Type=application/json \
             --body "$BODY"
           az functionapp restart -g $rg -n $FUNC_NAME
+
+      - name: Retry start after image update
+        run: |
+          set +e
+          rg=${{ steps.rg.outputs.rg_name }}
+          FUNC_NAME=${{ steps.bicep.outputs.func_name }}
+          if [ -z "$FUNC_NAME" ]; then
+            FUNC_NAME=$(az functionapp list -g "$rg" --query "[0].name" -o tsv)
+          fi
+          for i in {1..6}; do
+            echo "Restart attempt $i..."
+            az functionapp restart -g "$rg" -n "$FUNC_NAME" >/dev/null 2>&1
+            sleep 10
+          done
 
       - name: Verify container config
         run: |

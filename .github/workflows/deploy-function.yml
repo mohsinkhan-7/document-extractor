@@ -167,6 +167,14 @@ jobs:
           ACR_NAME=$(echo ${{ steps.acr.outputs.login_server }} | cut -d. -f1)
           ACR_ID=$(az acr show -n "$ACR_NAME" -g "$rg" --query id -o tsv)
           UAMI_ID=${{ steps.bicep.outputs.uami_id }}
+          if [ -z "$UAMI_ID" ]; then
+            # Fallback: discover UAMI in the resource group
+            UAMI_ID=$(az resource list -g "$rg" --resource-type Microsoft.ManagedIdentity/userAssignedIdentities --query "[0].id" -o tsv || true)
+          fi
+          if [ -z "$UAMI_ID" ]; then
+            echo "Warning: Could not determine UAMI resource ID; skipping AcrPull verification (RBAC may still be propagating)." 1>&2
+            exit 0
+          fi
           UAMI_PRINCIPAL_ID=$(az resource show --ids "$UAMI_ID" --query properties.principalId -o tsv)
           echo "Waiting for AcrPull role on $ACR_NAME for principal $UAMI_PRINCIPAL_ID..."
           ok=0

@@ -14,7 +14,7 @@ var token = uniqueString(subscription().id, resourceGroup().id, location, enviro
 var saName = 'azsa${token}'
 var planName = 'az-afp-${token}'
 var funcName = 'az-func-${token}'
-var acrName = 'az-acr-${token}'
+var acrName = 'azacr${token}'
 var uamiName = 'az-id-${token}'
 var aiName = 'az-ai-${token}'
 

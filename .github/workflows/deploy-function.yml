@@ -42,6 +42,27 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      - name: Verify Azure principal
+        id: whoami
+        shell: bash
+        env:
+          EXPECTED_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        run: |
+          set -e
+          # Show current account and principal (safe)
+          az account show --query '{name:name, id:id, tenantId:tenantId, user:user}' -o json
+          # Extract the logged-in principal clientId (for service principals, user.name is the clientId)
+          CURRENT_CLIENT_ID=$(az account show --query 'user.name' -o tsv || true)
+          if [ -z "$CURRENT_CLIENT_ID" ]; then
+            echo "Could not determine logged-in principal" 1>&2
+            exit 1
+          fi
+          if [ "$CURRENT_CLIENT_ID" != "$EXPECTED_CLIENT_ID" ]; then
+            echo "Logged in as unexpected client-id: $CURRENT_CLIENT_ID" 1>&2
+            echo "Fix: Update AZURE_CLIENT_ID secret to the correct App (the one with federated credential and role assignments), or grant this principal Contributor on the subscription/RG." 1>&2
+            exit 1
+          fi
+
       - name: Resolve subscription and resource group
         id: rg
         shell: bash

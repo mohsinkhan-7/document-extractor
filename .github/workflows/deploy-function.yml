@@ -22,6 +22,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate OIDC inputs
+        shell: bash
+        run: |
+          missing=()
+          [ -z "${{ secrets.AZURE_CLIENT_ID }}" ] && missing+=(AZURE_CLIENT_ID)
+          [ -z "${{ secrets.AZURE_TENANT_ID }}" ] && missing+=(AZURE_TENANT_ID)
+          [ -z "${{ secrets.AZURE_SUBSCRIPTION_ID }}" ] && missing+=(AZURE_SUBSCRIPTION_ID)
+          if [ ${#missing[@]} -ne 0 ]; then
+            echo "Required GitHub secrets are missing for OIDC login: ${missing[*]}" 1>&2
+            echo "Add these as environment secrets on the 'dev' environment (or repo-level secrets) and re-run." 1>&2
+            exit 1
+          fi
+
       - name: Azure login (OIDC)
         uses: azure/login@v2
         with:

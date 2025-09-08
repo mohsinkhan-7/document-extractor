@@ -1,9 +1,34 @@
 import cv2
 import pytesseract
+import os
+from dotenv import load_dotenv
 import re
 import json
 from PIL import Image, ImageEnhance
 from datetime import datetime
+
+"""
+Tesseract configuration
+- We load environment variables from .env if present.
+- You can set TESSERACT_CMD (preferred) to the full path of tesseract.exe on Windows
+  e.g., C:\\Program Files\\Tesseract-OCR\\tesseract.exe
+  If not set, we try common install locations on Windows.
+"""
+
+load_dotenv()
+
+_tesseract_cmd = os.getenv("TESSERACT_CMD") or os.getenv("TESSERACT_PATH")
+if _tesseract_cmd and os.path.exists(_tesseract_cmd):
+    pytesseract.pytesseract.tesseract_cmd = _tesseract_cmd
+else:
+    # Try common Windows install paths
+    for _candidate in (
+        r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe",
+        r"C:\\Program Files (x86)\\Tesseract-OCR\\tesseract.exe",
+    ):
+        if os.path.exists(_candidate):
+            pytesseract.pytesseract.tesseract_cmd = _candidate
+            break
 
 
 def parse_mrz_date(date_str):
@@ -62,6 +87,15 @@ def extract_chip_number(img, card_number):
 
 
 def extract_card_data(image_path: str):
+    # Fail fast if Tesseract is unavailable, with a clearer message
+    try:
+        _ = pytesseract.get_tesseract_version()
+    except Exception as e:
+        raise RuntimeError(
+            "Tesseract OCR engine is not installed or not configured. "
+            "Install Tesseract and/or set TESSERACT_CMD to the full path to tesseract.exe."
+        ) from e
+
     img = cv2.imread(image_path)
 
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)

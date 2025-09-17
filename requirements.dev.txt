@@ -1,0 +1,7 @@
+-r requirements.prod.txt
+# Dev / tooling (optional)
+watchfiles==1.1.0
+# linters / formatters (uncomment if you want them)
+# black
+# mypy
+# pytest

@@ -5,13 +5,13 @@ beautifulsoup4==4.13.4
 blinker==1.9.0
 certifi==2025.7.14
 charset-normalizer==3.4.2
-click==8.2.1
+click==8.1.7
 et_xmlfile==2.0.0
 fastapi==0.116.1
 Flask==3.1.2
 h11==0.16.0
 httptools==0.6.4
-idna==3.10
+idna==2.10
 itsdangerous==2.2.0
 Jinja2==3.1.6
 lxml==6.0.0
@@ -62,3 +62,6 @@ pdf2image==1.17.0
 python-docx==1.1.2
 arabic-reshaper==3.0.0
 python-bidi==0.4.2
+pypdf==4.3.1
+deep-translator==1.11.4
+gTTS==2.5.4

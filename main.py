@@ -1,50 +1,31 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form
-from fastapi.responses import StreamingResponse
-from controller import CardController
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import FileResponse
+from controller import CardController, PDFController
 import shutil
 import uuid
 import os
-import io
-from pdf_ocr_service import (
-    split_pdf_into_chapters,
-    split_pdf_every_n_pages,
-    split_pdf_by_toc,
-    translate_text,
-    tts_bytes,
-    chapters_to_zip,
-    chapters_texts_zip,
-    chapters_texts_to_docx_zip,
-    has_docx,
-    OCRDependencyError,
-    translate_chapters_parallel,
-    chapters_to_zip_parallel,
-    chapter_text_to_docx_bytes,
-)
+from pdf_ocr_service import diagnose_environment, OCRConfigurationError, OCRDependencyError
 
 app = FastAPI(title="Document Extractor API", version="1.0.0")
 
-
-def _assert_pdf_file(path: str):
-    """Validate that a file is a PDF by inspecting its header.
-    Raises HTTPException 400 if invalid.
-    """
-    try:
-        with open(path, "rb") as f:
-            head = f.read(1024)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Unable to read uploaded file.")
-    if not head:
-        raise HTTPException(status_code=400, detail="Empty file uploaded.")
-    # Common non-PDF: ZIP/DOCX start with 'PK\x03\x04'
-    if head.startswith(b"PK\x03\x04"):
-        raise HTTPException(status_code=400, detail="Uploaded file is a ZIP/DOCX, not a PDF. Please upload a PDF.")
-    # Robust PDF check: look for '%PDF' near the beginning
-    if b"%PDF" not in head[:1024]:
-        raise HTTPException(status_code=400, detail="Uploaded file does not look like a PDF. Ensure you are sending the original PDF.")
+@app.get("/")
+async def root():
+    return {
+        "service": "document-extractor",
+        "endpoints": [
+            "GET /", "GET /health", "GET /diagnostics/ocr",
+            "POST /extract-card", "POST /pdf/ocr-word", "POST /pdf/chapters", "POST /pdf/chapters-docx", "POST /pdf/chapters-zip", "GET /files/{filename}",
+            "POST /pdf/toc", "POST /pdf/chapters-zip-from-toc"
+        ]
+    }
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "docx_available": bool(has_docx())}
+    return {"status": "ok"}
+
+@app.get("/diagnostics/ocr")
+async def ocr_diagnostics():
+    return diagnose_environment()
 
 @app.post("/extract-card")
 async def extract_card(file: UploadFile = File(...)):
@@ -69,59 +50,38 @@ async def extract_card(file: UploadFile = File(...)):
         except Exception:
             pass
 
+@app.post("/pdf/ocr-word")
+async def pdf_ocr_word(file: UploadFile = File(...), start_page: int = 1):
+    temp_pdf = f"temp_{uuid.uuid4().hex}.pdf"
+    with open(temp_pdf, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    output_docx = f"output_{uuid.uuid4().hex}.docx"
+    try:
+        path = PDFController.pdf_to_word(temp_pdf, output_docx, start_page=start_page)
+        return FileResponse(path, media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document", filename=os.path.basename(path))
+    except (OCRConfigurationError, OCRDependencyError) as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to process PDF")
+    finally:
+        try:
+            if os.path.exists(temp_pdf):
+                os.remove(temp_pdf)
+        except Exception:
+            pass
 
-
-
-@app.post("/pdf/chapters-zip")
-async def pdf_chapters_zip(
-    file: UploadFile = File(...),
-    chapter_index: int | None = Form(default=None),
-    fallback_pages: int | None = Form(default=None),
-    use_toc: bool = Form(default=False),
-    toc_first_page: int = Form(default=0),
-    toc_last_page: int = Form(default=0),
-    printed_offset: int = Form(default=0),
-):
-    """Split the uploaded PDF into chapters.
-    - If `chapter_index` is provided (1-based), returns a single DOCX for that chapter.
-    - Otherwise, returns a ZIP of per-chapter DOCX files.
-    """
+@app.post("/pdf/chapters")
+async def pdf_chapters(file: UploadFile = File(...), start_page: int = 1):
     temp_pdf = f"temp_{uuid.uuid4().hex}.pdf"
     with open(temp_pdf, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
     try:
-        _assert_pdf_file(temp_pdf)
-        if use_toc:
-            fp = int(toc_first_page) if toc_first_page and toc_first_page > 0 else 1
-            lp = int(toc_last_page) if toc_last_page and toc_last_page >= fp else fp
-            try:
-                chapters = split_pdf_by_toc(temp_pdf, toc_first_page=fp, toc_last_page=lp, printed_to_pdf_offset=int(printed_offset))
-            except Exception:
-                chapters = split_pdf_into_chapters(temp_pdf)
-        else:
-            chapters = split_pdf_into_chapters(temp_pdf)
-        if len(chapters) <= 1 and fallback_pages:
-            # If heuristics found only one chapter, optionally split by fixed page count
-            chapters = split_pdf_every_n_pages(temp_pdf, int(fallback_pages))
-        if chapter_index is not None:
-            i = int(chapter_index)
-            if i < 1 or i > len(chapters):
-                raise HTTPException(status_code=400, detail="chapter_index out of range")
-            ch = chapters[i - 1]
-            data = chapter_text_to_docx_bytes(ch.get("title") or f"Chapter_{i}", ch.get("text", ""))
-            filename = f"chapter_{i:02d}.docx"
-            return StreamingResponse(io.BytesIO(data), media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document", headers={
-                "Content-Disposition": f"attachment; filename={filename}"
-            })
-        else:
-            zip_bytes = chapters_texts_to_docx_zip(chapters)
-            return StreamingResponse(io.BytesIO(zip_bytes), media_type="application/zip", headers={
-                "Content-Disposition": "attachment; filename=chapters_docx.zip"
-            })
-    except OCRDependencyError as e:
+        chapters = PDFController.extract_chapters(temp_pdf, start_page=start_page)
+        return {"status": "success", "chapters": chapters}
+    except (OCRConfigurationError, OCRDependencyError) as e:
         raise HTTPException(status_code=500, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to generate chapters ZIP: {e}")
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to extract chapters")
     finally:
         try:
             if os.path.exists(temp_pdf):
@@ -130,110 +90,129 @@ async def pdf_chapters_zip(
             pass
 
 
-
-
-
-
-# ------ New endpoints: direct split, translate, and TTS ------
-
-
-
-
-
-@app.post("/translate/chapters")
-async def api_translate_chapters(
-    file: UploadFile = File(...),
-    target_lang: str = Form(...),
-    download: bool = Form(False),
-    max_workers: int = Form(3),
-    chapter_index: int | None = Form(default=None),
-    fallback_pages: int | None = Form(default=None),
-    use_toc: bool = Form(default=False),
-    toc_first_page: int = Form(default=0),
-    toc_last_page: int = Form(default=0),
-    printed_offset: int = Form(default=0),
-):
+@app.post("/pdf/chapters-docx")
+async def pdf_chapters_and_docx(file: UploadFile = File(...), download: bool = False, start_page: int = 1):
+    """Full flow: OCR PDF -> chapters JSON -> DOCX built from chapters (ensures consistent segmentation)."""
     temp_pdf = f"temp_{uuid.uuid4().hex}.pdf"
-    with open(temp_pdf, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    with open(temp_pdf, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    output_docx = f"chapters_{uuid.uuid4().hex}.docx"
     try:
-        _assert_pdf_file(temp_pdf)
-        if use_toc:
-            fp = int(toc_first_page) if toc_first_page and toc_first_page > 0 else 1
-            lp = int(toc_last_page) if toc_last_page and toc_last_page >= fp else fp
-            try:
-                chapters = split_pdf_by_toc(temp_pdf, toc_first_page=fp, toc_last_page=lp, printed_to_pdf_offset=int(printed_offset))
-            except Exception:
-                chapters = split_pdf_into_chapters(temp_pdf)
-        else:
-            chapters = split_pdf_into_chapters(temp_pdf)
-        if len(chapters) <= 1 and fallback_pages:
-            chapters = split_pdf_every_n_pages(temp_pdf, int(fallback_pages))
-        chapters = translate_chapters_parallel(chapters, target_lang, max_workers=max_workers)
-        if chapter_index is not None:
-            i = int(chapter_index)
-            if i < 1 or i > len(chapters):
-                raise HTTPException(status_code=400, detail="chapter_index out of range")
-            ch = chapters[i - 1]
-            data = chapter_text_to_docx_bytes(ch.get("title") or f"Chapter_{i}", ch.get("text", ""))
-            filename = f"chapter_{i:02d}_{target_lang}.docx"
-            return StreamingResponse(io.BytesIO(data), media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document", headers={
-                "Content-Disposition": f"attachment; filename={filename}"
-            })
+        chapters = PDFController.extract_chapters(temp_pdf, start_page=start_page)
+        PDFController.chapters_to_word(chapters, output_docx)
         if download:
-            zip_bytes = chapters_texts_to_docx_zip(chapters)
-            return StreamingResponse(io.BytesIO(zip_bytes), media_type="application/zip", headers={
-                "Content-Disposition": f"attachment; filename=translated_chapters_{target_lang}.zip"
-            })
+            return FileResponse(
+                output_docx,
+                media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                filename=os.path.basename(output_docx),
+            )
         else:
-            return {"chapters": chapters}
-    except OCRDependencyError as e:
+            return {
+                "status": "success",
+                "chapters": chapters,
+                "docx_filename": output_docx
+            }
+    except (OCRConfigurationError, OCRDependencyError) as e:
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to translate chapters: {e}")
+        raise HTTPException(status_code=500, detail="Failed to process PDF")
     finally:
         try:
-            os.remove(temp_pdf)
-        except OSError:
+            if os.path.exists(temp_pdf):
+                os.remove(temp_pdf)
+        except Exception:
             pass
 
 
-@app.post("/tts/chapters")
-async def api_tts_chapters(
-    file: UploadFile = File(...),
-    lang: str = Form("en"),
-    max_workers: int = Form(3),
-    use_toc: bool = Form(default=False),
-    toc_first_page: int = Form(default=0),
-    toc_last_page: int = Form(default=0),
-    printed_offset: int = Form(default=0),
-):
+@app.get("/files/{filename}")
+async def download_file(filename: str):
+    # Prevent path traversal, only serve files from CWD
+    safe_name = os.path.basename(filename)
+    path = os.path.join(os.getcwd(), safe_name)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(
+        path,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        filename=safe_name,
+    )
+
+
+@app.post("/pdf/chapters-zip")
+async def pdf_chapters_zip(file: UploadFile = File(...), start_page: int = 1):
     temp_pdf = f"temp_{uuid.uuid4().hex}.pdf"
-    with open(temp_pdf, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    with open(temp_pdf, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    zip_name = f"chapters_{uuid.uuid4().hex}.zip"
     try:
-        _assert_pdf_file(temp_pdf)
-        if use_toc:
-            fp = int(toc_first_page) if toc_first_page and toc_first_page > 0 else 1
-            lp = int(toc_last_page) if toc_last_page and toc_last_page >= fp else fp
-            try:
-                chapters = split_pdf_by_toc(temp_pdf, toc_first_page=fp, toc_last_page=lp, printed_to_pdf_offset=int(printed_offset))
-            except Exception:
-                chapters = split_pdf_into_chapters(temp_pdf)
-        else:
-            chapters = split_pdf_into_chapters(temp_pdf)
-        # Translate each chapter to the requested language first, then synthesize
-        chapters = translate_chapters_parallel(chapters, lang, max_workers=max_workers)
-        zip_bytes = chapters_to_zip_parallel(chapters, lang, max_workers=max_workers)
-        return StreamingResponse(io.BytesIO(zip_bytes), media_type="application/zip", headers={
-            "Content-Disposition": f"attachment; filename=chapters_audio_{lang}.zip"
-        })
-    except OCRDependencyError as e:
+        result = PDFController.chapters_zip(temp_pdf, zip_name, start_page=start_page)
+        return FileResponse(
+            result["zip_path"],
+            media_type="application/zip",
+            filename=os.path.basename(result["zip_path"]),
+        )
+    except (OCRConfigurationError, OCRDependencyError) as e:
         raise HTTPException(status_code=500, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to generate TTS ZIP: {e}")
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to generate chapters ZIP")
     finally:
         try:
-            os.remove(temp_pdf)
-        except OSError:
+            if os.path.exists(temp_pdf):
+                os.remove(temp_pdf)
+        except Exception:
+            pass
+
+
+@app.post("/pdf/toc")
+async def pdf_toc(file: UploadFile = File(...), toc_page: int = 5):
+    temp_pdf = f"temp_{uuid.uuid4().hex}.pdf"
+    with open(temp_pdf, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    try:
+        entries = PDFController.toc_entries(temp_pdf, toc_page=toc_page)
+        return {"status": "success", "entries": entries}
+    except (OCRConfigurationError, OCRDependencyError) as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to parse TOC")
+    finally:
+        try:
+            if os.path.exists(temp_pdf):
+                os.remove(temp_pdf)
+        except Exception:
+            pass
+
+
+@app.post("/pdf/chapters-zip-from-toc")
+async def pdf_chapters_zip_from_toc(
+    file: UploadFile = File(...), toc_page: int = 5, printed_to_pdf_offset: int = 0
+):
+    """
+    Export per-chapter DOCX using TOC page numbers on a specific page.
+    - toc_page: the 1-based PDF page index where the TOC exists (e.g., 5)
+    - printed_to_pdf_offset: difference between printed page numbers and actual PDF page numbers.
+      Example: if printed page 1 corresponds to PDF page 6, offset = 5.
+    """
+    temp_pdf = f"temp_{uuid.uuid4().hex}.pdf"
+    with open(temp_pdf, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    zip_name = f"chapters_toc_{uuid.uuid4().hex}.zip"
+    try:
+        result = PDFController.chapters_zip_from_toc(
+            temp_pdf, zip_name, toc_page=toc_page, printed_to_pdf_offset=printed_to_pdf_offset
+        )
+        return FileResponse(
+            result["zip_path"],
+            media_type="application/zip",
+            filename=os.path.basename(result["zip_path"]),
+        )
+    except (OCRConfigurationError, OCRDependencyError) as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Failed to generate TOC-based chapters ZIP")
+    finally:
+        try:
+            if os.path.exists(temp_pdf):
+                os.remove(temp_pdf)
+        except Exception:
             pass

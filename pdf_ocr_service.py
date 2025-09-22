@@ -429,8 +429,9 @@ def export_chapters_to_zip(pdf_path: str, zip_path: str, start_page: int = 1) ->
 
 # --- TOC-based chapter export -------------------------------------------------
 
-_TRAILING_PAGE_RE = re.compile(r"^(?P<title>.+?)\s*[\.·•\-–—\s]*\s(?P<page>[0-9\u0660-\u0669]{1,4})$")
-
+_TRAILING_PAGE_RE = re.compile(
+    r"^(?P<title>.+?)\s*[\.\·•\-–—،…\s]*\s(?P<page>[0-9\u0660-\u0669]{1,4})$"
+)
 
 def _arabic_digits_to_int(s: str) -> int | None:
     # Convert Arabic-Indic digits to Latin then parse
@@ -443,6 +444,37 @@ def _arabic_digits_to_int(s: str) -> int | None:
         return int(m.group(1))
     except Exception:
         return None
+    
+def detect_toc_page(pdf_path: str, max_scan_pages: int = 10, lang: str | None = None) -> int | None:
+    """Scan first pages of PDF and try to detect TOC page by keywords."""
+    poppler_path = _resolve_poppler_path()
+    if convert_from_path is None:
+        raise OCRDependencyError("pdf2image not available. Install dependencies.")
+    if pytesseract is None:
+        raise OCRDependencyError("pytesseract not available. Install dependencies.")
+
+    _configure_tesseract()
+    if lang is None:
+        lang = os.getenv("OCR_LANG", "ara+eng")
+
+    try:
+        images = convert_from_path(
+            pdf_path, first_page=1, last_page=max_scan_pages,
+            poppler_path=poppler_path, dpi=150
+        )
+    except Exception as e:
+        raise OCRConfigurationError(f"Failed scanning for TOC: {e}")
+
+    keywords = ["المحتويات", "فهرس", "جدول المحتويات"]
+    for idx, img in enumerate(images, start=1):
+        try:
+            txt = pytesseract.image_to_string(img, lang=lang)
+        except Exception:
+            continue
+        for kw in keywords:
+            if kw in txt:
+                return idx
+    return None
 
 
 def extract_toc_entries(pdf_path: str, toc_page: int = 5, lang: str | None = None) -> List[Dict[str, Any]]:
@@ -451,42 +483,87 @@ def extract_toc_entries(pdf_path: str, toc_page: int = 5, lang: str | None = Non
         raise OCRDependencyError("pdf2image not available. Install dependencies.")
     if pytesseract is None:
         raise OCRDependencyError("pytesseract not available. Install dependencies.")
+
     _configure_tesseract()
     if lang is None:
         lang = os.getenv("OCR_LANG", "ara+eng")
+
     try:
-        images = convert_from_path(pdf_path, first_page=toc_page, last_page=toc_page, poppler_path=poppler_path)
+        # Use higher DPI for better OCR of Arabic fonts
+        images = convert_from_path(
+            pdf_path, first_page=toc_page, last_page=toc_page,
+            poppler_path=poppler_path, dpi=300
+        )
     except Exception as e:
         raise OCRConfigurationError(f"Failed reading TOC page: {e}")
+
     if not images:
         return []
+
     try:
         txt = pytesseract.image_to_string(images[0], lang=lang)
     except Exception as e:
         raise OCRConfigurationError(f"Tesseract OCR failed on TOC page: {e}")
+
     entries: List[Dict[str, Any]] = []
     for raw in txt.splitlines():
         line = _normalize_line(raw)
         if not line:
             continue
+
+        # Collapse repeating dots/dashes
+        line = re.sub(r"[\.·•،…\-–—]{2,}", " … ", line)
+
         m = _TRAILING_PAGE_RE.search(line)
         if not m:
             continue
+
         title = m.group("title").strip(". \t").strip()
         page_s = m.group("page")
         page_i = _arabic_digits_to_int(page_s)
         if page_i is None:
             continue
-        entries.append({"title": title, "printed_page": page_i})
+
+        entries.append({
+            "title": title,
+            "printed_page": page_i
+        })
+
     return entries
+
 
 
 def export_chapters_to_zip_from_toc(pdf_path: str, zip_path: str, toc_page: int = 5, printed_to_pdf_offset: int = 0) -> Dict[str, Any]:
     # OCR all pages once; slice per chapter using TOC page numbers
+    
+    pages = _ocr_pdf_to_pages(pdf_path)
+    # toc = extract_toc_entries(pdf_path, toc_page=toc_page)
+    # Auto-detect TOC if not provided explicitly
+    if toc_page is None or toc_page <= 0:
+        detected = detect_toc_page(pdf_path)
+        if detected:
+            toc_page = detected
+
+    # OCR all pages once; slice per chapter using TOC page numbers
     pages = _ocr_pdf_to_pages(pdf_path)
     toc = extract_toc_entries(pdf_path, toc_page=toc_page)
+
     if not toc:
-        raise RuntimeError("No TOC entries detected on the specified page")
+        # Fallback: return the raw OCR text for debugging instead of 500
+        try:
+            poppler_path = _resolve_poppler_path()
+            images = convert_from_path(pdf_path, first_page=toc_page, last_page=toc_page, poppler_path=poppler_path, dpi=300)
+            raw_txt = pytesseract.image_to_string(images[0], lang=os.getenv("OCR_LANG", "ara+eng"))
+        except Exception as e:
+            raw_txt = f"[OCR failed: {e}]"
+
+        return {
+            "zip_path": None,
+            "count": 0,
+            "toc_count": 0,
+            "raw_toc_text": raw_txt
+        }
+
     # Compute start indices in 1-based PDF page numbers, then to 0-based for list slicing
     starts: List[Dict[str, Any]] = []
     for e in toc:

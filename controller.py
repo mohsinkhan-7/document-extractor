@@ -1,5 +1,5 @@
-from extractor_service import extract_card_data
-from pdf_ocr_service import (
+from .extractor_service import extract_card_data
+from .pdf_ocr_service import (
     pdf_to_word_chapters,
     extract_chapters_as_json,
     chapters_json_to_word,

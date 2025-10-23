@@ -9,8 +9,8 @@ password = "@MBRLWorld2024"
 login_url = "https://doctransgpt.com/signin"
 
 # Input and output
-DOC_FILE = r"C:\Users\Mohsin\Downloads\chapters_bc5b6d81a7d846c1b17930f89e60e10c\52_ثمانمائة_wale.docx"
-OUTPUT_DIR = r"C:\Users\Mohsin\Downloads\translated"
+DOC_FILE = r"/Users/dell/PycharmProjects/document-extractor/_كتاب العبرات (1).pdf"
+OUTPUT_DIR = r"/Users/dell/PycharmProjects/document-extractor/translated"
 
 
 async def click_translate_arrow(page):
